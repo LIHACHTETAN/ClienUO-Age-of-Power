@@ -1,0 +1,56 @@
+name: FPC Win64 Toolchain
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-toolchain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Pull FPC 3.2.2 Win64 cross image
+        run: docker pull signumtemporis/fpc:3.2.2-cross.x86_64-win64.full
+
+      - name: Verify compiler and Win64 output
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/fpc-smoke"
+          cat > "$RUNNER_TEMP/fpc-smoke/hello.pas" <<'PAS'
+          program hello;
+          begin
+            WriteLn('FPC Win64 toolchain OK');
+          end.
+          PAS
+          docker run --rm \
+            -v "$RUNNER_TEMP/fpc-smoke:/workspace" \
+            signumtemporis/fpc:3.2.2-cross.x86_64-win64.full \
+            hello.pas
+          test -f "$RUNNER_TEMP/fpc-smoke/hello.exe"
+          file "$RUNNER_TEMP/fpc-smoke/hello.exe" | tee "$RUNNER_TEMP/fpc-smoke/hello-file.txt"
+          grep -Eqi 'PE32\+.*x86-64|PE32.*x86-64' "$RUNNER_TEMP/fpc-smoke/hello-file.txt"
+
+      - name: Export portable root filesystem
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cid="$(docker create signumtemporis/fpc:3.2.2-cross.x86_64-win64.full)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker export "$cid" | zstd -T0 -15 -o fpc-3.2.2-win64-cross-rootfs.tar.zst
+          sha256sum fpc-3.2.2-win64-cross-rootfs.tar.zst > fpc-3.2.2-win64-cross-rootfs.sha256
+          ls -lh fpc-3.2.2-win64-cross-rootfs.tar.zst
+
+      - name: Upload toolchain artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpc-3.2.2-win64-cross-rootfs
+          path: |
+            fpc-3.2.2-win64-cross-rootfs.tar.zst
+            fpc-3.2.2-win64-cross-rootfs.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
