@@ -1,0 +1,70 @@
+name: FPC Win32 Wibo Toolchain
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-toolchain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Pull FPC 3.2.2 Win32 cross image
+        run: docker pull signumtemporis/fpc:3.2.2-cross.i386-win32.full
+
+      - name: Build wibo x86_64 host binary
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/decompals/wibo.git "$RUNNER_TEMP/wibo"
+          cmake --preset release64 -S "$RUNNER_TEMP/wibo"
+          cmake --build --preset release64 --parallel
+          find "$RUNNER_TEMP/wibo/build" -type f -name wibo -exec cp {} "$RUNNER_TEMP/wibo-x86_64" \;
+          test -x "$RUNNER_TEMP/wibo-x86_64"
+          "$RUNNER_TEMP/wibo-x86_64" --version
+
+      - name: Verify Win32 Pascal execution
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/fpc-smoke"
+          cat > "$RUNNER_TEMP/fpc-smoke/hello.pas" <<'PAS'
+          program hello;
+          begin
+            WriteLn('FPC Win32 plus wibo OK');
+          end.
+          PAS
+          docker run --rm \
+            -v "$RUNNER_TEMP/fpc-smoke:/workspace" \
+            signumtemporis/fpc:3.2.2-cross.i386-win32.full \
+            hello.pas
+          test -f "$RUNNER_TEMP/fpc-smoke/hello.exe"
+          file "$RUNNER_TEMP/fpc-smoke/hello.exe" | tee "$RUNNER_TEMP/fpc-smoke/hello-file.txt"
+          grep -Eqi 'PE32.*Intel 80386' "$RUNNER_TEMP/fpc-smoke/hello-file.txt"
+          "$RUNNER_TEMP/wibo-x86_64" "$RUNNER_TEMP/fpc-smoke/hello.exe" | tee "$RUNNER_TEMP/fpc-smoke/run.txt"
+          grep -F 'FPC Win32 plus wibo OK' "$RUNNER_TEMP/fpc-smoke/run.txt"
+
+      - name: Export portable compiler and runner
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cid="$(docker create signumtemporis/fpc:3.2.2-cross.i386-win32.full)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker export "$cid" | zstd -T0 -15 -o fpc-3.2.2-win32-cross-rootfs.tar.zst
+          cp "$RUNNER_TEMP/wibo-x86_64" ./wibo-x86_64
+          sha256sum fpc-3.2.2-win32-cross-rootfs.tar.zst wibo-x86_64 > fpc-win32-wibo.sha256
+
+      - name: Upload toolchain artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpc-3.2.2-win32-wibo
+          path: |
+            fpc-3.2.2-win32-cross-rootfs.tar.zst
+            wibo-x86_64
+            fpc-win32-wibo.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
