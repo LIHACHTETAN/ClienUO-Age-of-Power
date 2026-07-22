@@ -36,7 +36,7 @@ jobs:
             WriteLn('FPC 3.2.2 native execution OK');
           end.
           PAS
-          docker commit fpc-native-dev fpc-native-dev:3.2.2
+          docker commit --change='ENTRYPOINT ["fpc"]' fpc-native-dev fpc-native-dev:3.2.2
           docker run --rm \
             -v "$RUNNER_TEMP/fpc-smoke:/workspace" \
             fpc-native-dev:3.2.2 \
