@@ -10,10 +10,20 @@ permissions:
 jobs:
   build-toolchain:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - name: Pull FPC 3.2.2 native Linux image
         run: docker pull signumtemporis/fpc:3.2.2-full
+
+      - name: Add native linker and SDL2 development runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker create --name fpc-native-dev \
+            --entrypoint /bin/sh \
+            signumtemporis/fpc:3.2.2-full \
+            -lc 'apk add --no-cache build-base musl-dev sdl2-dev'
+          docker start -a fpc-native-dev
 
       - name: Verify native Pascal execution
         shell: bash
@@ -26,9 +36,10 @@ jobs:
             WriteLn('FPC 3.2.2 native execution OK');
           end.
           PAS
+          docker commit fpc-native-dev fpc-native-dev:3.2.2
           docker run --rm \
             -v "$RUNNER_TEMP/fpc-smoke:/workspace" \
-            signumtemporis/fpc:3.2.2-full \
+            fpc-native-dev:3.2.2 \
             hello.pas
           test -x "$RUNNER_TEMP/fpc-smoke/hello"
           "$RUNNER_TEMP/fpc-smoke/hello" | tee "$RUNNER_TEMP/fpc-smoke/run.txt"
@@ -38,18 +49,16 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cid="$(docker create signumtemporis/fpc:3.2.2-full)"
-          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
-          docker export "$cid" | zstd -T0 -15 -o fpc-3.2.2-linux-x86_64-rootfs.tar.zst
-          sha256sum fpc-3.2.2-linux-x86_64-rootfs.tar.zst > fpc-native.sha256
+          docker export fpc-native-dev | zstd -T0 -15 -o fpc-3.2.2-linux-x86_64-dev-rootfs.tar.zst
+          sha256sum fpc-3.2.2-linux-x86_64-dev-rootfs.tar.zst > fpc-native-dev.sha256
 
       - name: Upload toolchain artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fpc-3.2.2-native-linux-rootfs
+          name: fpc-3.2.2-native-linux-dev-rootfs
           path: |
-            fpc-3.2.2-linux-x86_64-rootfs.tar.zst
-            fpc-native.sha256
+            fpc-3.2.2-linux-x86_64-dev-rootfs.tar.zst
+            fpc-native-dev.sha256
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
