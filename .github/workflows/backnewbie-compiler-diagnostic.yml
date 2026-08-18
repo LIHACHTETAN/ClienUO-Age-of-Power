@@ -1,0 +1,58 @@
+name: BackNewbie Compiler Diagnostic
+
+on:
+  push:
+    branches:
+      - ci/backnewbie-official-001
+  pull_request:
+    branches:
+      - ClientUO-Age-of-Power
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+      - uses: actions/checkout@v4
+        with:
+          repository: ClassicUO/ClassicUO
+          ref: ac6163efe1af6218368026bd67ff4cde54071b96
+          submodules: recursive
+          fetch-depth: 1
+          path: project
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+      - name: Apply overlay
+        shell: pwsh
+        run: |
+          $chunks = @(Get-ChildItem "$env:GITHUB_WORKSPACE\ci\ci_backnewbie\chunks\*.txt" | Sort-Object Name)
+          $b64 = ($chunks | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
+          $archive = "$env:RUNNER_TEMP\overlay.tar.gz"
+          [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "OVERLAY_SHA=$hash"
+          if ($hash -ne 'c9686979b7de3d492b252498162ce4622d7ab874b5b8ca69ac5e83e9c2d63fac') { throw 'Overlay SHA mismatch' }
+          tar -xzf $archive -C "$env:GITHUB_WORKSPACE\project"
+      - name: Restore
+        shell: pwsh
+        working-directory: project
+        run: dotnet restore ClassicUO.sln
+      - name: Compile and print only errors
+        shell: pwsh
+        working-directory: project
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'build-errors.log'
+          & dotnet build ClassicUO.sln -c Release --no-restore *> $log
+          $code = $LASTEXITCODE
+          Write-Host '=== UNIQUE COMPILER ERRORS ==='
+          $errors = @(Get-Content $log | Select-String -Pattern ': error CS\d+:' | ForEach-Object { $_.Line.Trim() } | Sort-Object -Unique)
+          if ($errors.Count -eq 0) { Write-Host 'NO_CS_ERRORS' } else { $errors | ForEach-Object { Write-Host $_ } }
+          Write-Host "ERROR_COUNT=$($errors.Count)"
+          exit $code
