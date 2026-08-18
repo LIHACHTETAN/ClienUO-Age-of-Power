@@ -1,0 +1,191 @@
+name: BackNewbie Real Windows Verification v3
+
+on:
+  push:
+    branches:
+      - ci/backnewbie-official-001
+    paths-ignore:
+      - 'ci_backnewbie/results/**'
+
+permissions:
+  contents: write
+
+env:
+  RESULT_BRANCH: ci/backnewbie-official-001
+  RESULT_PATH: ci_backnewbie/results/latest.txt
+  UPSTREAM_SHA: ac6163efe1af6218368026bd67ff4cde54071b96
+  OVERLAY_SHA: c9686979b7de3d492b252498162ce4622d7ab874b5b8ca69ac5e83e9c2d63fac
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout official ClassicUO
+        uses: actions/checkout@v4
+        with:
+          repository: ClassicUO/ClassicUO
+          ref: ac6163efe1af6218368026bd67ff4cde54071b96
+          submodules: recursive
+          fetch-depth: 1
+          path: project
+
+      - name: Setup exact .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Verify, test, package, and publish report
+        id: verify
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'LIHACHTETAN/ClienUO-Age-of-Power'
+          $project = Join-Path $env:GITHUB_WORKSPACE 'project'
+          $client = Join-Path $env:GITHUB_WORKSPACE 'client'
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'artifact'
+          $report = [System.Collections.Generic.List[string]]::new()
+          $failed = $false
+          $failStage = ''
+
+          function Add-Result([string]$s) { $script:report.Add($s); Write-Host $s }
+          function Fail-Stage([string]$stage, [string[]]$details) {
+            $script:failed = $true
+            $script:failStage = $stage
+            Add-Result "FAIL: $stage"
+            foreach ($d in $details) { if (-not [string]::IsNullOrWhiteSpace($d)) { Add-Result "  $d" } }
+          }
+          function Run-Captured([string]$stage, [scriptblock]$command) {
+            if ($script:failed) { return }
+            $log = Join-Path $env:RUNNER_TEMP (($stage -replace '[^A-Za-z0-9_-]','_') + '.log')
+            try {
+              & $command *> $log
+              $code = $LASTEXITCODE
+              if ($null -eq $code) { $code = 0 }
+            } catch {
+              $_ | Out-String | Set-Content $log -Append
+              $code = 1
+            }
+            if ($code -ne 0) {
+              $lines = @(Get-Content $log | Select-String -Pattern ': error CS\d+:|error [A-Z]{2,}\d+:|Build FAILED|Test Run Failed|Failed!|Unhandled Exception|FileNotFoundException' | ForEach-Object { $_.Line.Trim() } | Sort-Object -Unique)
+              if ($lines.Count -eq 0) { $lines = @(Get-Content $log -Tail 60) }
+              Fail-Stage $stage $lines
+            } else {
+              Add-Result "PASS: $stage"
+            }
+          }
+          function Publish-Report {
+            $header = @(
+              'ClassicUO Official + BackNewbie 001 - REAL WINDOWS CI REPORT',
+              "UTC: $([DateTime]::UtcNow.ToString('s'))Z",
+              "Upstream: ClassicUO/ClassicUO@$env:UPSTREAM_SHA",
+              'Runner: windows-latest',
+              'Required SDK: 10.0.302',
+              "Overlay SHA256: $env:OVERLAY_SHA",
+              ''
+            )
+            $bodyText = (($header + $script:report) -join "`n") + "`n"
+            if ($script:failed) { $bodyText += "OVERALL=FAIL`nFAILED_STAGE=$script:failStage`n" } else { $bodyText += "OVERALL=PASS`n" }
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bodyText))
+            $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+            $uri = "https://api.github.com/repos/$repo/contents/$env:RESULT_PATH"
+            $sha = $null
+            try { $existing = Invoke-RestMethod -Uri ($uri + "?ref=$env:RESULT_BRANCH") -Headers $headers; $sha = $existing.sha } catch { }
+            $payload = @{ message = '[skip ci] Update BackNewbie real CI result'; content = $encoded; branch = $env:RESULT_BRANCH }
+            if ($sha) { $payload.sha = $sha }
+            Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -ContentType 'application/json' -Body ($payload | ConvertTo-Json) | Out-Null
+          }
+
+          try {
+            Add-Result 'START: reconstruct overlay from verified Git blobs'
+            $blobShas = @(
+              'ecb4ac23d65e7f58dba9fd5996c713eba311026b',
+              'db024d182e00068e2c7df1c44ad4d161aa39ee7e',
+              '2f4c6793d7a7c11a60077f16bc11c7396352cc76',
+              'b920ad096f392c9bbf644530be5eef81527f733d',
+              '1a74831791b20a2e0d1b8e01a0f899883f67beb2',
+              '2b7a7fe3aa878980bfe965f8234eb31ffd0512e9',
+              '28f1f34f46943a405dcdd26ae3f57068277d782c',
+              'aef071d0c7325303f2c818ddcb9fee547dff5c26',
+              '974dfeccb8dec975601c06853deacd6a24c8aecc'
+            )
+            $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+            $parts = @()
+            foreach ($sha in $blobShas) {
+              $obj = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/blobs/$sha" -Headers $headers
+              $bytes = [Convert]::FromBase64String(($obj.content -replace '\s',''))
+              $parts += [Text.Encoding]::UTF8.GetString($bytes)
+            }
+            $archive = Join-Path $env:RUNNER_TEMP 'backnewbie-overlay.tar.gz'
+            [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String(($parts -join '')))
+            $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $env:OVERLAY_SHA) { Fail-Stage 'Overlay SHA256' @("expected=$env:OVERLAY_SHA", "actual=$hash") }
+            else { Add-Result "PASS: Overlay SHA256 = $hash"; tar -xzf $archive -C $project; if ($LASTEXITCODE -ne 0) { Fail-Stage 'Overlay extraction' @("tar exit=$LASTEXITCODE") } else { Add-Result 'PASS: Overlay extraction' } }
+
+            if (-not $failed) {
+              $v = (dotnet --version).Trim()
+              if ($v -ne '10.0.302') { Fail-Stage 'Exact SDK version' @("actual=$v") } else { Add-Result "PASS: Exact SDK version = $v" }
+            }
+
+            if (-not $failed) {
+              $legacy = @('YokoInjection','InjectionScript','InjectionRuntime','NativeScintillaEditor','YokoScriptEditorGump')
+              $textFiles = Get-ChildItem $project -Recurse -File | Where-Object { $_.Extension -in '.cs','.csproj','.props','.targets','.json','.xml','.md','.txt','.yml','.yaml','.ps1','.cmd' }
+              $legacyHits = @()
+              foreach ($p in $legacy) { $h = $textFiles | Select-String -SimpleMatch $p -ErrorAction SilentlyContinue | Select-Object -First 1; if ($h) { $legacyHits += "$p -> $($h.Path):$($h.LineNumber)" } }
+              if ($legacyHits.Count) { Fail-Stage 'Legacy trace scan' $legacyHits } else { Add-Result 'PASS: Legacy trace scan' }
+            }
+
+            Push-Location $project
+            Run-Captured 'dotnet restore ClassicUO.sln' { dotnet restore ClassicUO.sln }
+            Run-Captured 'Release build ClassicUO.sln' { dotnet build ClassicUO.sln -c Release --no-restore }
+            Run-Captured 'All xUnit tests Release' { dotnet test tests/ClassicUO.UnitTests/ClassicUO.UnitTests.csproj -c Release --no-build --logger "trx;LogFileName=all-tests.trx" --results-directory TestResults }
+            Run-Captured 'BackNewbie filtered xUnit tests' { dotnet test tests/ClassicUO.UnitTests/ClassicUO.UnitTests.csproj -c Release --no-build --filter "FullyQualifiedName~BackNewbie" --logger "trx;LogFileName=backnewbie-tests.trx" --results-directory TestResultsBackNewbie }
+            Run-Captured 'Debug build ClassicUO.sln' { dotnet build ClassicUO.sln -c Debug --no-restore }
+            Run-Captured 'Publish Bootstrap Release' { dotnet publish src/ClassicUO.Bootstrap/src/ClassicUO.Bootstrap.csproj -c Release -o $client /p:OutputType=WinExe }
+            Run-Captured 'Publish Client win-x64 Release' { dotnet publish src/ClassicUO.Client/ClassicUO.Client.csproj -c Release -r win-x64 -o $client /p:IS_DEV_BUILD=true /p:NativeLib=Shared /p:OutputType=Library }
+            Pop-Location
+
+            if (-not $failed) {
+              $required = @('ClassicUO.exe','cuo.dll','System.Runtime.CompilerServices.Unsafe.dll','System.Memory.dll','System.Buffers.dll','SDL3.dll','FNA3D.dll','FAudio.dll')
+              $missing = @($required | Where-Object { -not (Test-Path (Join-Path $client $_)) })
+              if ($missing.Count) { Fail-Stage 'Runtime dependency closure' ($missing | ForEach-Object { "missing=$_" }) }
+              else {
+                $unsafeName = [Reflection.AssemblyName]::GetAssemblyName((Join-Path $client 'System.Runtime.CompilerServices.Unsafe.dll'))
+                if ($unsafeName.Version.Major -ne 6) { Fail-Stage 'Unsafe assembly version' @($unsafeName.FullName) }
+                else { Add-Result 'PASS: Runtime dependency closure'; Add-Result "PASS: Unsafe assembly = $($unsafeName.FullName)" }
+              }
+            }
+
+            if (-not $failed) {
+              New-Item -ItemType Directory -Path $artifact -Force | Out-Null
+              New-Item -ItemType Directory -Path (Join-Path $artifact 'Project') -Force | Out-Null
+              robocopy $project (Join-Path $artifact 'Project') /E /XD .git bin obj TestResults TestResultsBackNewbie | Out-Null
+              if ($LASTEXITCODE -gt 7) { Fail-Stage 'Package Project tree' @("robocopy=$LASTEXITCODE") }
+              else {
+                Copy-Item $client (Join-Path $artifact 'Client') -Recurse -Force
+                Copy-Item (Join-Path $project 'TestResults\all-tests.trx') (Join-Path $artifact 'all-tests.trx') -Force
+                Copy-Item (Join-Path $project 'TestResultsBackNewbie\backnewbie-tests.trx') (Join-Path $artifact 'backnewbie-tests.trx') -Force
+                Add-Result 'PASS: Project + Client artifact tree'
+              }
+            }
+          } catch {
+            if (-not $failed) { Fail-Stage 'Unexpected CI exception' @(($_ | Out-String).Trim()) }
+          } finally {
+            Publish-Report
+          }
+
+          if ($failed) { exit 1 }
+          Add-Result 'PASS: ALL REAL WINDOWS CI CHECKS'
+          exit 0
+
+      - name: Upload tested Project + Client
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClassicUO-Official-BackNewbie-001-TESTED
+          path: artifact
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 7
