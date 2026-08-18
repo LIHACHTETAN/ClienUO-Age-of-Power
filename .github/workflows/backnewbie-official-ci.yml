@@ -31,24 +31,24 @@ jobs:
           fetch-depth: 1
           path: project
 
-      - name: Setup .NET 10
+      - name: Setup .NET 10.0.302
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
-          include-prerelease: false
+          dotnet-version: 10.0.302
 
-      - name: Apply BackNewbie overlay
+      - name: Apply verified BackNewbie overlay
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $b64Path = Join-Path $env:GITHUB_WORKSPACE 'ci\ci_backnewbie\overlay.tar.gz.b64'
+          $chunkDir = Join-Path $env:GITHUB_WORKSPACE 'ci\ci_backnewbie\chunks'
+          $chunks = @(Get-ChildItem $chunkDir -Filter '*.txt' | Sort-Object Name)
+          if ($chunks.Count -ne 9) { throw "Expected 9 overlay chunks, got $($chunks.Count)" }
+          $b64 = ($chunks | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
           $archive = Join-Path $env:RUNNER_TEMP 'backnewbie-overlay.tar.gz'
-          $b64 = (Get-Content $b64Path -Raw).Trim()
           [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String($b64))
           $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne 'c9686979b7de3d492b252498162ce4622d7ab874b5b8ca69ac5e83e9c2d63fac') {
-            throw "Overlay SHA256 mismatch: $hash"
-          }
+          Write-Host "Overlay SHA256: $hash"
+          if ($hash -ne 'c9686979b7de3d492b252498162ce4622d7ab874b5b8ca69ac5e83e9c2d63fac') { throw "Overlay SHA256 mismatch: $hash" }
           tar -xzf $archive -C (Join-Path $env:GITHUB_WORKSPACE 'project')
 
       - name: Verify clean upstream plus BackNewbie footprint
@@ -71,15 +71,20 @@ jobs:
             'tests/ClassicUO.UnitTests/Configuration/BackNewbieProfileTests.cs',
             'tests/ClassicUO.UnitTests/Game/Managers/BackNewbieObstaclePlannerTests.cs'
           )
-          foreach ($rel in $expected) {
-            if (-not (Test-Path (Join-Path $root $rel))) { throw "Missing expected BackNewbie file: $rel" }
-          }
+          foreach ($rel in $expected) { if (-not (Test-Path (Join-Path $root $rel))) { throw "Missing expected BackNewbie file: $rel" } }
           $legacyPatterns = @('YokoInjection','InjectionScript','InjectionRuntime','NativeScintillaEditor','YokoScriptEditorGump')
           $textFiles = Get-ChildItem $root -Recurse -File | Where-Object { $_.Extension -in '.cs','.csproj','.props','.targets','.json','.xml','.md','.txt','.yml','.yaml','.ps1','.cmd' }
           foreach ($pattern in $legacyPatterns) {
             $hit = $textFiles | Select-String -SimpleMatch $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($hit) { throw "Forbidden legacy trace '$pattern' in $($hit.Path):$($hit.LineNumber)" }
           }
+
+      - name: Verify SDK exact version
+        shell: pwsh
+        run: |
+          $v = (dotnet --version).Trim()
+          Write-Host "dotnet SDK: $v"
+          if ($v -ne '10.0.302') { throw "Expected SDK 10.0.302, got $v" }
 
       - name: Restore official solution
         shell: pwsh
@@ -121,32 +126,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $client = Join-Path $env:GITHUB_WORKSPACE 'client'
-          $required = @(
-            'ClassicUO.exe',
-            'cuo.dll',
-            'System.Runtime.CompilerServices.Unsafe.dll',
-            'System.Memory.dll',
-            'System.Buffers.dll',
-            'SDL3.dll',
-            'FNA3D.dll',
-            'FAudio.dll'
-          )
-          foreach ($name in $required) {
-            $path = Join-Path $client $name
-            if (-not (Test-Path $path)) { throw "Missing runtime dependency: $name" }
-          }
-          $unsafePath = Join-Path $client 'System.Runtime.CompilerServices.Unsafe.dll'
-          $unsafeName = [Reflection.AssemblyName]::GetAssemblyName($unsafePath)
+          $required = @('ClassicUO.exe','cuo.dll','System.Runtime.CompilerServices.Unsafe.dll','System.Memory.dll','System.Buffers.dll','SDL3.dll','FNA3D.dll','FAudio.dll')
+          foreach ($name in $required) { if (-not (Test-Path (Join-Path $client $name))) { throw "Missing runtime dependency: $name" } }
+          $unsafeName = [Reflection.AssemblyName]::GetAssemblyName((Join-Path $client 'System.Runtime.CompilerServices.Unsafe.dll'))
           Write-Host "Unsafe assembly: $($unsafeName.FullName)"
           if ($unsafeName.Version.Major -ne 6) { throw "Expected Unsafe major version 6, got $($unsafeName.Version)" }
-          Get-ChildItem $client -Filter *.dll | ForEach-Object {
-            try {
-              $an = [Reflection.AssemblyName]::GetAssemblyName($_.FullName)
-              Write-Host "Managed assembly OK: $($an.Name) $($an.Version)"
-            } catch {
-              Write-Host "Native DLL: $($_.Name)"
-            }
-          }
 
       - name: Build artifact tree
         shell: pwsh
@@ -163,6 +147,8 @@ jobs:
           Upstream: ClassicUO/ClassicUO
           Commit: ac6163efe1af6218368026bd67ff4cde54071b96
           Runner: windows-latest
+          SDK: 10.0.302
+          Overlay SHA256: c9686979b7de3d492b252498162ce4622d7ab874b5b8ca69ac5e83e9c2d63fac
           Restore: PASS
           Release build: PASS
           All xUnit tests: PASS
