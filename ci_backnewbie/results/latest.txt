@@ -1,5 +1,5 @@
 ClassicUO Official + BackNewbie 001 - REAL WINDOWS CI REPORT
-UTC: 2026-08-18T22:26:43Z
+UTC: 2026-08-18T22:37:39Z
 Upstream: ClassicUO/ClassicUO@ac6163efe1af6218368026bd67ff4cde54071b96
 Runner: windows-latest
 Required SDK: 10.0.302
@@ -7,7 +7,7 @@ Overlay SHA256: c9686979b7de3d492b252498162ce4622d7ab874b5b8ca69ac5e83e9c2d63fac
 
 START: reconstruct overlay from verified Git blobs
 FAIL: Unexpected CI exception
-  Invoke-RestMethod: D:\a\_temp\c2e35a82-a3c6-4cff-8754-f36b5e1caa35.ps1:75
+  Invoke-RestMethod: D:\a\_temp\b0a36cb7-4cff-4080-95fa-3a44126a34b7.ps1:75
 Line |
   75 |      $obj = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo …
      |             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
