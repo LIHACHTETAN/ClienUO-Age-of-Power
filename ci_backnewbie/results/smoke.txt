@@ -1,0 +1,9 @@
+ClassicUO Official + BackNewbie 001 - WINDOWS RUNTIME SMOKE
+SDK=10.0.302
+FAIL: Invoke-RestMethod: D:\a\_temp\7e7c2e83-b735-4679-98e1-7a17c8452866.ps1:17
+Line |
+  17 |      $o=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git …
+     |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     |  {   "message": "Not Found",   "documentation_url": "https://docs.github.com/rest/git/blobs#get-a-blob",  
+     | "status": "404" }
+SMOKE=FAIL
