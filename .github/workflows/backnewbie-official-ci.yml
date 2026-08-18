@@ -1,0 +1,184 @@
+name: BackNewbie Official CI
+
+on:
+  push:
+    branches:
+      - ci/backnewbie-official-001
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-package:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout CI payload
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Checkout official ClassicUO
+        uses: actions/checkout@v4
+        with:
+          repository: ClassicUO/ClassicUO
+          ref: ac6163efe1af6218368026bd67ff4cde54071b96
+          submodules: recursive
+          fetch-depth: 1
+          path: project
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          include-prerelease: false
+
+      - name: Apply BackNewbie overlay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b64Path = Join-Path $env:GITHUB_WORKSPACE 'ci\ci_backnewbie\overlay.tar.gz.b64'
+          $archive = Join-Path $env:RUNNER_TEMP 'backnewbie-overlay.tar.gz'
+          $b64 = (Get-Content $b64Path -Raw).Trim()
+          [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne 'c9686979b7de3d492b252498162ce4622d7ab874b5b8ca69ac5e83e9c2d63fac') {
+            throw "Overlay SHA256 mismatch: $hash"
+          }
+          tar -xzf $archive -C (Join-Path $env:GITHUB_WORKSPACE 'project')
+
+      - name: Verify clean upstream plus BackNewbie footprint
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'project'
+          $expected = @(
+            'src/ClassicUO.Client/Configuration/Profile.cs',
+            'src/ClassicUO.Client/Configuration/ProfileManager.cs',
+            'src/ClassicUO.Client/Game/Constants.cs',
+            'src/ClassicUO.Client/Game/Scenes/GameScene.cs',
+            'src/ClassicUO.Client/Game/Scenes/GameSceneInputHandler.cs',
+            'src/ClassicUO.Client/Game/UI/Gumps/OptionsGump.cs',
+            'src/ClassicUO.Client/Game/World.cs',
+            'src/ClassicUO.Client/Network/PacketHandlers.cs',
+            'src/ClassicUO.Client/Game/Managers/BackNewbieAutomationManager.cs',
+            'src/ClassicUO.Client/Game/Managers/BackNewbieObstaclePlanner.cs',
+            'src/ClassicUO.Client/Game/UI/Gumps/BackNewbieAutomationGump.cs',
+            'tests/ClassicUO.UnitTests/Configuration/BackNewbieProfileTests.cs',
+            'tests/ClassicUO.UnitTests/Game/Managers/BackNewbieObstaclePlannerTests.cs'
+          )
+          foreach ($rel in $expected) {
+            if (-not (Test-Path (Join-Path $root $rel))) { throw "Missing expected BackNewbie file: $rel" }
+          }
+          $legacyPatterns = @('YokoInjection','InjectionScript','InjectionRuntime','NativeScintillaEditor','YokoScriptEditorGump')
+          $textFiles = Get-ChildItem $root -Recurse -File | Where-Object { $_.Extension -in '.cs','.csproj','.props','.targets','.json','.xml','.md','.txt','.yml','.yaml','.ps1','.cmd' }
+          foreach ($pattern in $legacyPatterns) {
+            $hit = $textFiles | Select-String -SimpleMatch $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) { throw "Forbidden legacy trace '$pattern' in $($hit.Path):$($hit.LineNumber)" }
+          }
+
+      - name: Restore official solution
+        shell: pwsh
+        working-directory: project
+        run: dotnet restore ClassicUO.sln
+
+      - name: Build Release
+        shell: pwsh
+        working-directory: project
+        run: dotnet build ClassicUO.sln -c Release --no-restore
+
+      - name: Run all unit tests Release
+        shell: pwsh
+        working-directory: project
+        run: dotnet test tests/ClassicUO.UnitTests/ClassicUO.UnitTests.csproj -c Release --no-build --logger "trx;LogFileName=all-tests.trx" --results-directory TestResults
+
+      - name: Run BackNewbie tests separately
+        shell: pwsh
+        working-directory: project
+        run: dotnet test tests/ClassicUO.UnitTests/ClassicUO.UnitTests.csproj -c Release --no-build --filter "FullyQualifiedName~BackNewbie" --logger "trx;LogFileName=backnewbie-tests.trx" --results-directory TestResultsBackNewbie
+
+      - name: Build Debug
+        shell: pwsh
+        working-directory: project
+        run: dotnet build ClassicUO.sln -c Debug --no-restore
+
+      - name: Publish Windows bootstrap
+        shell: pwsh
+        working-directory: project
+        run: dotnet publish src/ClassicUO.Bootstrap/src/ClassicUO.Bootstrap.csproj -c Release -o ../client /p:OutputType=WinExe
+
+      - name: Publish Windows client
+        shell: pwsh
+        working-directory: project
+        run: dotnet publish src/ClassicUO.Client/ClassicUO.Client.csproj -c Release -r win-x64 -o ../client /p:IS_DEV_BUILD=true /p:NativeLib=Shared /p:OutputType=Library
+
+      - name: Validate runtime closure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $client = Join-Path $env:GITHUB_WORKSPACE 'client'
+          $required = @(
+            'ClassicUO.exe',
+            'cuo.dll',
+            'System.Runtime.CompilerServices.Unsafe.dll',
+            'System.Memory.dll',
+            'System.Buffers.dll',
+            'SDL3.dll',
+            'FNA3D.dll',
+            'FAudio.dll'
+          )
+          foreach ($name in $required) {
+            $path = Join-Path $client $name
+            if (-not (Test-Path $path)) { throw "Missing runtime dependency: $name" }
+          }
+          $unsafePath = Join-Path $client 'System.Runtime.CompilerServices.Unsafe.dll'
+          $unsafeName = [Reflection.AssemblyName]::GetAssemblyName($unsafePath)
+          Write-Host "Unsafe assembly: $($unsafeName.FullName)"
+          if ($unsafeName.Version.Major -ne 6) { throw "Expected Unsafe major version 6, got $($unsafeName.Version)" }
+          Get-ChildItem $client -Filter *.dll | ForEach-Object {
+            try {
+              $an = [Reflection.AssemblyName]::GetAssemblyName($_.FullName)
+              Write-Host "Managed assembly OK: $($an.Name) $($an.Version)"
+            } catch {
+              Write-Host "Native DLL: $($_.Name)"
+            }
+          }
+
+      - name: Build artifact tree
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'artifact'
+          New-Item -ItemType Directory -Path $artifact -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $artifact 'Project') -Force | Out-Null
+          robocopy (Join-Path $env:GITHUB_WORKSPACE 'project') (Join-Path $artifact 'Project') /E /XD .git bin obj TestResults TestResultsBackNewbie | Out-Host
+          if ($LASTEXITCODE -gt 7) { throw "robocopy Project failed: $LASTEXITCODE" }
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'client') (Join-Path $artifact 'Client') -Recurse -Force
+          @"
+          ClassicUO Official + BackNewbie 001 - REAL CI TEST REPORT
+          Upstream: ClassicUO/ClassicUO
+          Commit: ac6163efe1af6218368026bd67ff4cde54071b96
+          Runner: windows-latest
+          Restore: PASS
+          Release build: PASS
+          All xUnit tests: PASS
+          BackNewbie filtered xUnit tests: PASS
+          Debug build: PASS
+          Bootstrap publish: PASS
+          Client win-x64 publish: PASS
+          Runtime dependency closure: PASS
+          Unsafe major version 6: PASS
+          Legacy trace scan: PASS
+          "@ | Set-Content (Join-Path $artifact 'CI_TEST_REPORT.txt') -Encoding UTF8
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'project\TestResults\all-tests.trx') (Join-Path $artifact 'all-tests.trx') -Force
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'project\TestResultsBackNewbie\backnewbie-tests.trx') (Join-Path $artifact 'backnewbie-tests.trx') -Force
+
+      - name: Upload tested Project + Client
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClassicUO-Official-BackNewbie-001-TESTED
+          path: artifact
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 7
