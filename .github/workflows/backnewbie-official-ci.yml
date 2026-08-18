@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - ci/backnewbie-official-001
+  pull_request:
+    branches:
+      - ClientUO-Age-of-Power
 
 permissions:
   contents: read
